@@ -1,0 +1,55 @@
+{
+    "name": "personal-ag-usage",
+    "publisher": "personal",
+    "displayName": "Personal AG Usage",
+    "description": "Personal extension to track AntiGravity usage with full context and accuracy.",
+    "version": "0.3.0",
+    "icon": "icon.png",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/Starvez/personal-ag-usage"
+    },
+    "engines": {
+        "vscode": "^1.96.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "activationEvents": [
+        "onStartupFinished"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "personal-ag-usage.showDashboard",
+                "title": "AG Usage: Show Dashboard"
+            },
+            {
+                "command": "personal-ag-usage.refresh",
+                "title": "AG Usage: Refresh"
+            }
+        ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "pretest": "npm run compile && npm run lint",
+        "lint": "eslint src --ext ts",
+        "test": "node ./out/test/runTest.js"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.96.0",
+        "@types/glob": "^8.1.0",
+        "@types/mocha": "^10.0.6",
+        "@types/node": "20.x",
+        "@typescript-eslint/eslint-plugin": "^6.15.0",
+        "@typescript-eslint/parser": "^6.15.0",
+        "eslint": "^8.56.0",
+        "glob": "^8.1.0",
+        "mocha": "^10.2.0",
+        "typescript": "^5.3.3",
+        "@vscode/test-electron": "^2.3.8"
+    }
+}
