@@ -52,6 +52,12 @@ The extension passively monitors your usage and sends native VS Code notificatio
 2.  In VS Code, go to **Extensions** -> **...** -> **Install from VSIX...**.
 3.  Select the file and reload the window.
 
+## Requirements 🖥️
+
+*   **Platforms**: Windows 10/11, Linux, macOS
+*   **VS Code**: 1.96.0 or higher
+*   **AntiGravity**: Must be running locally with an active session
+
 ## Usage
 *   Click the **Status Bar Item** (`👑 Pro`) to open the dashboard.
 *   Run command `Personal AG Usage: Show Dashboard` from the Command Palette.
