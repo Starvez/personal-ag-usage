@@ -41,60 +41,120 @@ function validatePid(pid: number): boolean { return Number.isInteger(pid) && pid
 function validatePort(port: number): boolean { return Number.isInteger(port) && port >= MIN_PORT && port <= MAX_PORT; }
 
 async function findAntigravityProcess(): Promise<{ pid: number, csrfToken: string }> {
-    // Linux focused implementation for now
-    const stdout = await executeCommand('ps', ['-ww', '-eo', 'pid,args']);
-    const lines = stdout.split('\n');
+    const platform = os.platform();
+    
+    if (platform === 'win32') {
+        // Windows implementation using PowerShell
+        const stdout = await executeCommand('powershell', [
+            '-NoProfile',
+            '-Command',
+            `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${PROCESS_IDENTIFIERS.ANTIGRAVITY}*' -or $_.CommandLine -like '*${PROCESS_IDENTIFIERS.CSRF_TOKEN}*' } | Select-Object ProcessId, CommandLine | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }`
+        ]);
+        const lines = stdout.split('\n').filter(l => l.trim());
 
-    // Filter candidates
-    const candidates = lines.filter(line =>
-        line.includes(PROCESS_IDENTIFIERS.ANTIGRAVITY) ||
-        line.includes(PROCESS_IDENTIFIERS.CSRF_TOKEN)
-    );
+        if (lines.length === 0) throw new Error("Antigravity process not found.");
 
-    if (candidates.length === 0) throw new Error("Antigravity process not found.");
-
-    // Iterate to find one with a token
-    for (const cmd of candidates) {
-        try {
-            const token = extractCsrfToken(cmd);
-            const pidMatch = cmd.trim().match(/^(\d+)/);
-            if (pidMatch && token) {
-                return { pid: parseInt(pidMatch[1], 10), csrfToken: token };
+        for (const line of lines) {
+            try {
+                const token = extractCsrfToken(line);
+                const pidMatch = line.trim().match(/^(\d+)/);
+                if (pidMatch && token) {
+                    return { pid: parseInt(pidMatch[1], 10), csrfToken: token };
+                }
+            } catch {
+                // Continue if no token found in this candidate
             }
-        } catch {
-            // Continue if no token found in this candidate
         }
-    }
+        throw new Error("Found Antigravity process(es) but NONE had a CSRF token in args.");
+    } else {
+        // Unix/Linux/macOS implementation
+        const stdout = await executeCommand('ps', ['-ww', '-eo', 'pid,args']);
+        const lines = stdout.split('\n');
 
-    throw new Error("Found Antigravity process(es) but NONE had a CSRF token in args.");
+        // Filter candidates
+        const candidates = lines.filter(line =>
+            line.includes(PROCESS_IDENTIFIERS.ANTIGRAVITY) ||
+            line.includes(PROCESS_IDENTIFIERS.CSRF_TOKEN)
+        );
+
+        if (candidates.length === 0) throw new Error("Antigravity process not found.");
+
+        // Iterate to find one with a token
+        for (const cmd of candidates) {
+            try {
+                const token = extractCsrfToken(cmd);
+                const pidMatch = cmd.trim().match(/^(\d+)/);
+                if (pidMatch && token) {
+                    return { pid: parseInt(pidMatch[1], 10), csrfToken: token };
+                }
+            } catch {
+                // Continue if no token found in this candidate
+            }
+        }
+
+        throw new Error("Found Antigravity process(es) but NONE had a CSRF token in args.");
+    }
 }
 
 async function findListeningPorts(pid: number): Promise<number[]> {
-    // Try lsof first
-    try {
-        const stdout = await executeCommand('lsof', ['-iTCP', '-sTCP:LISTEN', '-n', '-P', '-p', String(pid)]);
-        const ports: number[] = [];
-        const regex = /:(\d+)\s+\(LISTEN\)/g;
-        let m;
-        while ((m = regex.exec(stdout)) !== null) {
-            ports.push(parseInt(m[1], 10));
-        }
-        return [...new Set(ports)];
-    } catch {
-        // Fallback to netstat
+    const platform = os.platform();
+    
+    if (platform === 'win32') {
+        // Windows implementation using netstat
         try {
-            const stdout = await executeCommand('netstat', ['-tlnp']);
+            const stdout = await executeCommand('netstat', ['-ano']);
             const ports: number[] = [];
             const lines = stdout.split('\n');
-            const pidPattern = new RegExp(`\\b${pid}/`);
+            
             for (const line of lines) {
-                if (!pidPattern.test(line)) continue;
-                const match = line.match(/:(\d+)\s/);
-                if (match) ports.push(parseInt(match[1], 10));
+                // Match lines with LISTENING state and our PID
+                // Format: TCP    127.0.0.1:12345    0.0.0.0:0    LISTENING    1234
+                if (!line.includes('LISTENING')) continue;
+                
+                const parts = line.trim().split(/\s+/);
+                const linePid = parseInt(parts[parts.length - 1], 10);
+                
+                if (linePid === pid) {
+                    // Extract port from address (e.g., "127.0.0.1:12345" or "[::]:12345")
+                    const addressPart = parts[1];
+                    const portMatch = addressPart.match(/:(\d+)$/);
+                    if (portMatch) {
+                        ports.push(parseInt(portMatch[1], 10));
+                    }
+                }
             }
-            return ports;
+            return [...new Set(ports)];
         } catch (e) {
-            throw new Error(`Failed to find ports: ${e}`);
+            throw new Error(`Failed to find ports on Windows: ${e}`);
+        }
+    } else {
+        // Unix/Linux/macOS implementation
+        // Try lsof first
+        try {
+            const stdout = await executeCommand('lsof', ['-iTCP', '-sTCP:LISTEN', '-n', '-P', '-p', String(pid)]);
+            const ports: number[] = [];
+            const regex = /:(\d+)\s+\(LISTEN\)/g;
+            let m;
+            while ((m = regex.exec(stdout)) !== null) {
+                ports.push(parseInt(m[1], 10));
+            }
+            return [...new Set(ports)];
+        } catch {
+            // Fallback to netstat
+            try {
+                const stdout = await executeCommand('netstat', ['-tlnp']);
+                const ports: number[] = [];
+                const lines = stdout.split('\n');
+                const pidPattern = new RegExp(`\\b${pid}/`);
+                for (const line of lines) {
+                    if (!pidPattern.test(line)) continue;
+                    const match = line.match(/:(\d+)\s/);
+                    if (match) ports.push(parseInt(match[1], 10));
+                }
+                return ports;
+            } catch (e) {
+                throw new Error(`Failed to find ports: ${e}`);
+            }
         }
     }
 }

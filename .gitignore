@@ -3,12 +3,9 @@ node_modules/
 .vscode-test/
 *.vsix
 .DS_Store
-.vscode/launch.json
-.vscode/settings.json
-.vscode/tasks.json
+.vscode/
 npm-debug.log
 yarn-error.log
 test-resources/
 debug_api_dump.js
 raw_usage_dump.json
-.vscode/

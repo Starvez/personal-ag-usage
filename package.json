@@ -3,7 +3,7 @@
     "publisher": "personal",
     "displayName": "Personal AG Usage",
     "description": "Personal extension to track AntiGravity usage with full context and accuracy.",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "icon": "icon.png",
     "repository": {
         "type": "git",
