@@ -29,7 +29,31 @@
                 "command": "personal-ag-usage.refresh",
                 "title": "AG Usage: Refresh"
             }
-        ]
+        ],
+        "configuration": {
+            "title": "Personal AG Usage",
+            "properties": {
+                "personal-ag-usage.security.verifySSL": {
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Verify SSL certificates when connecting to the AntiGravity API. **Warning:** Disabling this makes connections less secure. Only disable if you understand the security implications and are connecting to localhost."
+                },
+                "personal-ag-usage.network.retryAttempts": {
+                    "type": "number",
+                    "default": 3,
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Number of times to retry failed API requests"
+                },
+                "personal-ag-usage.network.retryDelay": {
+                    "type": "number",
+                    "default": 150,
+                    "minimum": 50,
+                    "maximum": 5000,
+                    "markdownDescription": "Delay in milliseconds between retry attempts"
+                }
+            }
+        }
     },
     "scripts": {
         "vscode:prepublish": "npm run compile",

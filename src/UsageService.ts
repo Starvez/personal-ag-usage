@@ -1,3 +1,15 @@
+/**
+ * Usage Service Module
+ * Handles process discovery, API communication, and usage tracking for the AntiGravity API
+ *
+ * This module provides:
+ * - Cross-platform process discovery (Windows, Linux, macOS)
+ * - Automatic port detection and validation
+ * - HTTPS API client with retry logic
+ * - Local usage tracking based on quota drops
+ * - Connection caching for performance
+ */
+
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 import * as https from 'https';
@@ -5,14 +17,24 @@ import * as os from 'os';
 import * as fs from 'fs';
 import {
     API_ENDPOINTS,
+    CACHE_TTL_MS,
+    CONFIG_NAMESPACE,
+    HTTP_SUCCESS_MAX,
+    HTTP_SUCCESS_MIN,
     IDE_INFO,
+    LOCALHOST,
     MAX_PORT,
-    MAX_PORT_VALIDATION_ATTEMPTS,
+    MAX_RETRY_ATTEMPTS,
     MAX_VALID_PID,
     MIN_PORT,
     PROCESS_IDENTIFIERS,
     REQUEST_TIMEOUT_MS,
-    RETRY_DELAY_MS
+    RETRY_DELAY_MS,
+    STORAGE_KEY_HISTORY,
+    STORAGE_KEY_LAST_QUOTAS,
+    USAGE_DETECTION_MAX_THRESHOLD,
+    USAGE_DETECTION_MIN_THRESHOLD,
+    USAGE_HISTORY_WINDOW_MS
 } from './constants';
 import {
     CachedConnection,
@@ -21,7 +43,6 @@ import {
     QuotaGroup
 } from './types';
 
-const LOCALHOST = '127.0.0.1';
 
 // --- PROCESS FINDING LOGIC ---
 
@@ -174,7 +195,21 @@ function extractCsrfToken(cmd: string): string {
     throw new Error("CSRF token not found in process args.");
 }
 
-async function makeRequest<T>(port: number, csrfToken: string, path: string, body: object): Promise<T> {
+/**
+ * Makes an HTTPS request to the AntiGravity API with retry logic
+ * @param port Port number to connect to
+ * @param csrfToken CSRF token for authentication
+ * @param path API endpoint path
+ * @param body Request body
+ * @param attemptNumber Current retry attempt (for internal use)
+ * @returns Promise resolving to the API response
+ */
+async function makeRequest<T>(port: number, csrfToken: string, path: string, body: object, attemptNumber: number = 1): Promise<T> {
+    const config = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
+    const verifySSL = config.get<boolean>('security.verifySSL', true);
+    const maxRetries = config.get<number>('network.retryAttempts', MAX_RETRY_ATTEMPTS);
+    const retryDelay = config.get<number>('network.retryDelay', RETRY_DELAY_MS);
+
     return new Promise((resolve, reject) => {
         const payload = JSON.stringify(body);
         const req = https.request({
@@ -188,20 +223,66 @@ async function makeRequest<T>(port: number, csrfToken: string, path: string, bod
                 'Content-Length': Buffer.byteLength(payload)
             },
             timeout: REQUEST_TIMEOUT_MS,
-            rejectUnauthorized: false
+            rejectUnauthorized: verifySSL
         }, res => {
             let data = '';
             res.on('data', c => data += c);
             res.on('end', () => {
-                if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
-                    return reject(new Error(`HTTP ${res.statusCode}`));
+                if (res.statusCode && (res.statusCode < HTTP_SUCCESS_MIN || res.statusCode > HTTP_SUCCESS_MAX)) {
+                    const error = new Error(`HTTP ${res.statusCode}`);
+
+                    // Retry on server errors (5xx) but not client errors (4xx)
+                    if (res.statusCode >= 500 && attemptNumber < maxRetries) {
+                        console.warn(`Request failed with ${res.statusCode}, retrying (${attemptNumber}/${maxRetries})...`);
+                        setTimeout(() => {
+                            makeRequest<T>(port, csrfToken, path, body, attemptNumber + 1)
+                                .then(resolve)
+                                .catch(reject);
+                        }, retryDelay * attemptNumber); // Exponential backoff
+                        return;
+                    }
+
+                    return reject(error);
                 }
-                try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
+                try {
+                    resolve(JSON.parse(data));
+                } catch (e) {
+                    reject(new Error(`Failed to parse response: ${e}`));
+                }
             });
         });
 
-        req.on('error', reject);
-        req.on('timeout', () => { req.destroy(); reject(new Error("Timeout")); });
+        req.on('error', (err) => {
+            // Retry on network errors
+            if (attemptNumber < maxRetries) {
+                console.warn(`Request failed with network error, retrying (${attemptNumber}/${maxRetries}):`, err.message);
+                setTimeout(() => {
+                    makeRequest<T>(port, csrfToken, path, body, attemptNumber + 1)
+                        .then(resolve)
+                        .catch(reject);
+                }, retryDelay * attemptNumber); // Exponential backoff
+            } else {
+                reject(err);
+            }
+        });
+
+        req.on('timeout', () => {
+            req.destroy();
+            const error = new Error("Request timeout");
+
+            // Retry on timeout
+            if (attemptNumber < maxRetries) {
+                console.warn(`Request timed out, retrying (${attemptNumber}/${maxRetries})...`);
+                setTimeout(() => {
+                    makeRequest<T>(port, csrfToken, path, body, attemptNumber + 1)
+                        .then(resolve)
+                        .catch(reject);
+                }, retryDelay * attemptNumber); // Exponential backoff
+            } else {
+                reject(error);
+            }
+        });
+
         req.write(payload);
         req.end();
     });
@@ -209,17 +290,25 @@ async function makeRequest<T>(port: number, csrfToken: string, path: string, bod
 
 // --- PUBLIC SERVICE ---
 
+/**
+ * Service for retrieving AntiGravity usage data
+ * Manages connection to the local AntiGravity API server and tracks quota usage
+ */
 export class UsageService {
     private cachedConnection: CachedConnection | null = null;
     private storage: vscode.Memento;
 
+    /**
+     * Creates a new UsageService instance
+     * @param storage VSCode Memento for persisting usage history
+     */
     constructor(storage: vscode.Memento) {
         this.storage = storage;
     }
 
     private async getConnection(): Promise<CachedConnection> {
         // Check cache
-        if (this.cachedConnection && (Date.now() - this.cachedConnection.timestamp < 300000)) {
+        if (this.cachedConnection && (Date.now() - this.cachedConnection.timestamp < CACHE_TTL_MS)) {
             return this.cachedConnection;
         }
 
@@ -230,23 +319,38 @@ export class UsageService {
 
         if (ports.length === 0) throw new Error("No ports found");
 
-        // Validate ports
+        // Validate ports by attempting API connection
+        const failedPorts: Array<{ port: number; error: string }> = [];
+
         for (const port of ports) {
             try {
-                // Determine if valid by making a harmless request (or just the real one)
-                // We'll just assume the first working one is correct.
+                console.log(`Validating port ${port}...`);
                 await makeRequest(port, csrfToken, API_ENDPOINTS.GET_USER_STATUS, { metadata: { ideName: IDE_INFO.NAME } });
 
+                console.log(`Successfully connected on port ${port}`);
                 const connection = { port, csrfToken, timestamp: Date.now() };
                 this.cachedConnection = connection;
                 return connection;
             } catch (e) {
-                console.warn(`Port ${port} failed validation`, e);
+                const errorMsg = e instanceof Error ? e.message : String(e);
+                failedPorts.push({ port, error: errorMsg });
+                console.warn(`Port ${port} failed validation: ${errorMsg}`);
             }
         }
-        throw new Error("Could not validate any port.");
+
+        // All ports failed - provide detailed error
+        const errorDetails = failedPorts
+            .map(({ port, error }) => `  - Port ${port}: ${error}`)
+            .join('\n');
+        throw new Error(`Could not validate any port. Tried ${ports.length} port(s):\n${errorDetails}`);
     }
 
+    /**
+     * Retrieves comprehensive usage data from the AntiGravity API
+     * Includes plan information, model quotas, and local usage tracking
+     * @returns Promise resolving to complete usage data
+     * @throws Error if connection fails or API returns invalid data
+     */
     public async getUsageData(): Promise<UsageData> {
         const conn = await this.getConnection();
         const res = await makeRequest<ServerUserStatusResponse>(
@@ -327,9 +431,6 @@ export class UsageService {
     }
 
     private async trackUsage(models: QuotaGroup[]) {
-        const STORAGE_KEY_HISTORY = 'usage_history_v1';
-        const STORAGE_KEY_LAST_QUOTAS = 'last_quotas_v1';
-
         // 1. Get History
         let history: { ts: number, delta: number }[] = this.storage.get(STORAGE_KEY_HISTORY, []);
         // 2. Get Last Quotas
@@ -348,8 +449,10 @@ export class UsageService {
                 // DETECT DROP
                 if (current < last) {
                     const diff = last - current;
-                    // Ignore tiny noise or massive jumps that look like errors (optional, but good for safety)
-                    if (diff > 0.0001 && diff < 0.9) {
+                    // Filter out noise and resets: Only track drops between thresholds
+                    // Min threshold (0.0001) filters floating-point noise
+                    // Max threshold (0.9) filters quota resets
+                    if (diff > USAGE_DETECTION_MIN_THRESHOLD && diff < USAGE_DETECTION_MAX_THRESHOLD) {
                         totalDelta += diff;
                     }
                 }
@@ -363,9 +466,8 @@ export class UsageService {
             history.push({ ts: now, delta: totalDelta });
         }
 
-        // 4. Prune History (> 7 days)
-        const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-        history = history.filter(h => (now - h.ts) < ONE_WEEK_MS);
+        // 4. Prune History (older than configured window)
+        history = history.filter(h => (now - h.ts) < USAGE_HISTORY_WINDOW_MS);
 
         // 5. Save
         await this.storage.update(STORAGE_KEY_HISTORY, history);
@@ -373,7 +475,7 @@ export class UsageService {
     }
 
     private getWeeklyUsage(): number {
-        const history: { ts: number, delta: number }[] = this.storage.get('usage_history_v1', []);
+        const history: { ts: number, delta: number }[] = this.storage.get(STORAGE_KEY_HISTORY, []);
         return history.reduce((sum, h) => sum + h.delta, 0);
     }
 }
